@@ -8,7 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
-  "strconv"
+	"strconv"
 	"time"
 )
 
@@ -18,6 +18,8 @@ type ProxyData struct {
 	IP      string `json:"query"`
 }
 var totalIPs, successCount, failureCount int
+
+var ipMap = make(map[string]bool)
 
 const (
     yellow = "\033[33m"
@@ -31,13 +33,16 @@ const (
 func checkProxy(ip, port string, timeout time.Duration, file *os.File, limit chan struct{}) bool {
 	defer func() {
 		<-limit
-	}()
+  }()
   success := false
+  if _, ok := ipMap[ip]; ok {
+    return success
+  }
 
 	proxyUrl, err := url.Parse("http://" + port)
 	if err != nil {
 		fmt.Println("Error parsing proxy URL:", err)
-		return false
+		return success
 	}
 
 	httpClient := &http.Client{
@@ -48,22 +53,22 @@ func checkProxy(ip, port string, timeout time.Duration, file *os.File, limit cha
 	proxyUrl.Host = ip + ":" + port
 	response, err := httpClient.Get("http://ip-api.com/json/")
 	if err != nil {
-		return false
+		return success
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		return false
+		return success
 	}
 
 	var data ProxyData
 	if err := json.NewDecoder(response.Body).Decode(&data); err != nil {
-		return false
+		return success
 	}
 
 	if data.IP != "" {
         if _, err := file.WriteString(fmt.Sprintf("%s:%s\n", ip, port)); err != nil {
-            return false
+            return success
         }
         fmt.Printf("%s:%s (ASN: %s, Country: %s, Actual IP: %s)\n", ip, port, data.ASN, data.Country, data.IP)
         success = true
@@ -100,7 +105,6 @@ func main() {
     }
     defer file.Close()
 
-    processed := make(map[string]bool)
     
     go func() {
         for range ticker.C {
@@ -128,11 +132,6 @@ func main() {
             ip = line
             port = os.Args[5]
         }
-        
-        if processed[ip+port] {
-            continue
-        }
-        processed[ip+port] = true
         
         limit <- struct{}{}
         currentThreads++
