@@ -7,110 +7,135 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sync"
-	"time"
-  "strings"
-  "log"
-  "io/ioutil"
+	"strings"
   "strconv"
+	"time"
 )
 
-func checkProxy(ip, port string, wg *sync.WaitGroup, file *os.File, semaphore chan bool) {
-	defer wg.Done()
-  log.SetOutput(ioutil.Discard)
+type ProxyData struct {
+	ASN     string `json:"as"`
+	Country string `json:"country"`
+	IP      string `json:"query"`
+}
+var totalIPs, successCount, failureCount int
+
+const (
+    yellow = "\033[33m"
+    blue   = "\033[34m"
+    green  = "\033[32m"
+    red    = "\033[31m"
+    reset  = "\033[0m"
+)
+
+func checkProxy(ip, port string, timeout time.Duration, file *os.File, limit chan struct{}) bool {
+	defer func() {
+		<-limit
+	}()
+  success := false
+
 	proxyUrl, err := url.Parse("http://" + port)
 	if err != nil {
 		fmt.Println("Error parsing proxy URL:", err)
-		return
+		return false
 	}
+
 	httpClient := &http.Client{
 		Transport: &http.Transport{Proxy: http.ProxyURL(proxyUrl)},
-		Timeout:   time.Second * 2,
+		Timeout:   timeout,
 	}
+
 	proxyUrl.Host = ip + ":" + port
 	response, err := httpClient.Get("http://ip-api.com/json/")
 	if err != nil {
-		return
+		return false
 	}
 	defer response.Body.Close()
+
 	if response.StatusCode != http.StatusOK {
-		return
+		return false
 	}
-	var data struct {
-		ASN     string `json:"as"`
-		Country string `json:"country"`
-    IP string `json:"query"`   
+
+	var data ProxyData
+	if err := json.NewDecoder(response.Body).Decode(&data); err != nil {
+		return false
 	}
-  if err := json.NewDecoder(response.Body).Decode(&data); err != nil {
-		return
-	}  
-	if data.IP == "" {
-		return
-	}
-  if _, err := file.WriteString(fmt.Sprintf("%s:%s\n", ip, port)); err != nil {
-		return
-	}
-	fmt.Printf("%s:%s (ASN: %s, Country: %s, Actual IP: %s)\n", ip, port, data.ASN, data.Country, data.IP)
-  <-semaphore
+
+	if data.IP != "" {
+        if _, err := file.WriteString(fmt.Sprintf("%s:%s\n", ip, port)); err != nil {
+            return false
+        }
+        fmt.Printf("%s:%s (ASN: %s, Country: %s, Actual IP: %s)\n", ip, port, data.ASN, data.Country, data.IP)
+        success = true
+    }
+    return success
+}
+
+func handlePanic() {
+    if r := recover(); r != nil {
+        fmt.Printf("%sUsage:%s zmap -p port -q | %s./scanner%s output-file max-threads timeout update-timeout port\n", yellow, reset, green, reset)
+    fmt.Printf("%sOR%s\n", blue, reset)
+    fmt.Printf("%sUsage:%s cat input-file | %s./scanner%s output-file max-threads timeout update-timeout\n", yellow, reset, green, reset)
+        return
+    }
 }
 
 func main() {
-  var port string
-  var output string
-  var maxThreads int
-  if len(os.Args) < 2 {
-    fmt.Print("\033c")
-    fmt.Println("\n"+"zmap -p port -q | ./scanner outputfile port <threads>"+"\n")
-    fmt.Println(`masscan -p port1,port2 0.0.0.0/0 --rate=99999999 --exclude 255.255.255.255 | awk '{print $6":"$4}' | sed 's/\/tcp//g' | ./scanner outputfile <threads>`+"\n")
-    fmt.Println("cat ips.txt | ./scanner outputfile port <threads>"+"\n")
-    fmt.Println(`cat proxies.txt | ./scanner outputfile <threads>`)
-    return
-  }
-  output = os.Args[1]
-  if len(os.Args) >= 3 {
-    if value, err := strconv.Atoi(os.Args[2]); err == nil {
-      maxThreads = value
+    defer handlePanic()
+    output := os.Args[1]
+    maxThreads, _ := strconv.Atoi(os.Args[2])
+    timeoutSeconds, _ := strconv.Atoi(os.Args[3])
+    timeout := time.Duration(timeoutSeconds) * time.Second
+    updateSeconds, _ := strconv.Atoi(os.Args[4])
+    currentThreads := 0
+    limit := make(chan struct{}, maxThreads)
+    ticker := time.NewTicker(time.Second * time.Duration(updateSeconds))
+    ip := ""
+    port := ""
+    
+    file, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+    if err != nil {
+        fmt.Println("Error opening file:", err)
+        os.Exit(1)
     }
-  } else {
-    maxThreads = 100
-  }
-	file, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		fmt.Println("Error opening file:", err)
-    	os.Exit(1)
-  }
-  defer file.Close()
-  threads := make(chan bool, maxThreads)
-  scanner := bufio.NewScanner(os.Stdin)
-  var wg sync.WaitGroup
-  semaphore := make(chan struct{}, maxThreads)
-  for scanner.Scan() {
-    scanned := scanner.Text()
-    if strings.Contains(scanned, ":") {
-      proxy := strings.Split(scanned, ":")
-      semaphore <- struct{}{}
-      wg.Add(1)
-      go func() {
-        checkProxy(proxy[0], proxy[1], &wg, file,threads)
-        <-semaphore
-      }()
-    } else {
-      if len(os.Args) < 3 {
-        fmt.Print("\033c")
-        fmt.Println("\n"+"zmap -p port -q | ./scanner outputfile port <threads>"+"\n")
-        fmt.Println(`masscan -p port1,port2 0.0.0.0/0 --rate=99999999 --exclude 255.255.255.255 | awk '{print $6":"$4}' | sed 's/\/tcp//g' | ./scanner outputfile <threads>`+"\n")
-        fmt.Println("cat ips.txt | ./scanner outputfile port <threads>"+"\n")
-        fmt.Println(`cat proxies.txt | ./scanner outputfile <threads>`)
-        return
+    defer file.Close()
+
+    
+    go func() {
+        for range ticker.C {
+          fmt.Printf("%sCurrent threads:%s %s%d%s, %sIPs processed:%s %s%d%s, %sSuccesses:%s %s%d%s, %sFailures:%s %s%d%s\n",
+        yellow, reset, yellow, currentThreads, reset, blue, reset, blue, totalIPs, reset,
+        green, reset, green, successCount, reset,
+        red, reset, red, failureCount, reset,
+    )
+        }
+    }()
+    
+    scanner := bufio.NewScanner(os.Stdin)
+    if err := scanner.Err(); err != nil {
+        fmt.Fprintln(os.Stderr, "reading standard input:", err)
+    }
+    for scanner.Scan() {
+        totalIPs++
+        line := strings.TrimSpace(scanner.Text())
+        
+        if strings.Contains(line, ":") {
+          proxy := strings.Split(line, ":")
+          ip = proxy[0]
+          port = proxy[1]
+        } else {
+          ip = line
+          port = os.Args[5]
+        }
+        
+        limit <- struct{}{}
+        currentThreads++
+        go func() {
+            if checkProxy(ip, port, timeout, file, limit) {
+                successCount++
+            } else {
+                failureCount++
+            }
+            currentThreads--
+        }()
       }
-      port = os.Args[2]
-      semaphore <- struct{}{}
-      wg.Add(1)
-      go func() {
-        checkProxy(scanned, port, &wg, file, threads)
-        <-semaphore
-      }()
-    }
-  }
-  wg.Wait()
 }
