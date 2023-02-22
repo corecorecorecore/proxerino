@@ -27,6 +27,7 @@ const (
     reset  = "\033[0m"
 )
 
+
 func checkProxy(ip, port string, timeout time.Duration, file *os.File, limit chan struct{}) bool {
 	defer func() {
 		<-limit
@@ -99,14 +100,15 @@ func main() {
     }
     defer file.Close()
 
+    processed := make(map[string]bool)
     
     go func() {
         for range ticker.C {
-          fmt.Printf("%sCurrent threads:%s %s%d%s, %sIPs processed:%s %s%d%s, %sSuccesses:%s %s%d%s, %sFailures:%s %s%d%s\n",
-        yellow, reset, yellow, currentThreads, reset, blue, reset, blue, totalIPs, reset,
-        green, reset, green, successCount, reset,
-        red, reset, red, failureCount, reset,
-    )
+            fmt.Printf("%sCurrent threads:%s %s%d%s, %sIPs processed:%s %s%d%s, %sSuccesses:%s %s%d%s, %sFailures:%s %s%d%s\n",
+                yellow, reset, yellow, currentThreads, reset, blue, reset, blue, totalIPs, reset,
+                green, reset, green, successCount, reset,
+                red, reset, red, failureCount, reset,
+            )
         }
     }()
     
@@ -119,13 +121,18 @@ func main() {
         line := strings.TrimSpace(scanner.Text())
         
         if strings.Contains(line, ":") {
-          proxy := strings.Split(line, ":")
-          ip = proxy[0]
-          port = proxy[1]
+            proxy := strings.Split(line, ":")
+            ip = proxy[0]
+            port = proxy[1]
         } else {
-          ip = line
-          port = os.Args[5]
+            ip = line
+            port = os.Args[5]
         }
+        
+        if processed[ip+port] {
+            continue
+        }
+        processed[ip+port] = true
         
         limit <- struct{}{}
         currentThreads++
@@ -137,5 +144,5 @@ func main() {
             }
             currentThreads--
         }()
-      }
+    }
 }
