@@ -7,3 +7,5 @@ Usage: zmap -p port -q | ./scanner output-file max-threads timeout update-timeou
 OR
 Usage: cat input-file | ./scanner output-file max-threads timeout update-timeout
 ```
+
+use with hostings like https://snowcore.io
